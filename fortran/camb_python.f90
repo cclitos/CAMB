@@ -646,6 +646,21 @@
 
     end subroutine CAMB_SetTensorCls
 
+    subroutine CAMB_SetVectorCls(Data, lmax, vector_Cls)
+    type(CAMBdata) :: Data
+    integer, intent(in) :: lmax
+    real(dl), intent(out) :: vector_Cls(4, 0:lmax)
+    integer lmx
+
+    vector_Cls = 0
+    if (Data%CP%WantVectors) then
+        lmx = min(lmax, Data%CP%Max_l)
+        vector_Cls(1:4, Data%CP%Min_l:lmx) = &
+            transpose(Data%CLdata%Cl_vector(Data%CP%Min_l:lmx, CT_Temp:CT_Cross))
+    end if
+
+    end subroutine CAMB_SetVectorCls
+
     subroutine CAMB_SetUnlensedScalarArray(Data, lmax, ScalarArray, n)
     type(CAMBdata) :: Data
     integer, intent(in) :: lmax, n

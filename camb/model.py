@@ -278,6 +278,27 @@ class CustomSources(CAMB_Structure):
     )
 
 
+class StringSourceParams(CAMB_Structure):
+    """
+    Tabulated cosmic string (unconnected segment model) eigenmode source functions.
+    Don't change this directly; use :meth:`.model.CAMBparams.set_string_source`.
+    """
+
+    _fields_ = (
+        ("active", c_bool, "whether the string source is used (replaces inflationary initial conditions)"),
+        ("nx", c_int, "number of grid points"),
+        ("gamma_w", c_double, "weight exponent gamma: Theta = amp * F(x) / (x^gamma sqrt(tau))"),
+        ("amp", c_double, "overall amplitude"),
+        ("lnx", AllocatableArrayDouble, "ln(k tau) grid"),
+        ("tens", AllocatableArrayDouble, "tensor anisotropic stress F"),
+        ("vec", AllocatableArrayDouble, "vector anisotropic stress F"),
+        ("s00", AllocatableArrayDouble, "scalar density F"),
+        ("sstress", AllocatableArrayDouble, "scalar anisotropic stress F"),
+        ("ds00", AllocatableArrayDouble, "dF/dln(x) for the scalar density"),
+        ("dsstress", AllocatableArrayDouble, "dF/dln(x) for the scalar anisotropic stress"),
+    )
+
+
 @fortran_class
 class CAMBparams(F2003Class):
     """
@@ -418,6 +439,7 @@ class CAMBparams(F2003Class):
         ("min_l_logl_sampling", c_int, "Minimum L to use log sampling for L"),
         ("SourceWindows", AllocatableObjectArray(SourceWindow)),
         ("CustomSources", CustomSources),
+        ("StringSource", StringSourceParams),
     )
 
     H0: float
@@ -1111,6 +1133,43 @@ class CAMBparams(F2003Class):
             return powers
 
     _custom_source_name_dict: ClassVar[dict] = {}
+
+    def set_string_source(self, lnx, tens=None, vec=None, s00=None, sstress=None, gamma_w=0.25, amp=1.0):
+        """
+        Use tabulated cosmic string source functions as active sources, replacing the inflationary primordial
+        perturbations. Each source is Theta(k, tau) = amp * F(x) / (x**gamma_w * sqrt(tau)) with x = k*tau and F
+        tabulated on the ascending grid ln x.
+
+        :param lnx: ascending grid of ln(k tau)
+        :param tens: F for the tensor anisotropic stress (None for zero)
+        :param vec: F for the vector anisotropic stress
+        :param s00: F for the scalar energy density
+        :param sstress: F for the scalar anisotropic stress
+        :param gamma_w: weight exponent
+        :param amp: overall amplitude
+        :return: self
+        """
+        import numpy as np
+
+        lnx = np.ascontiguousarray(lnx, dtype=np.float64)
+        n = lnx.size
+
+        def tab(a):
+            return np.zeros(n) if a is None else np.ascontiguousarray(a, dtype=np.float64)
+
+        ss = self.StringSource
+        ss.active = True
+        ss.nx = n
+        ss.gamma_w = gamma_w
+        ss.amp = amp
+        ss.lnx = lnx
+        ss.tens = tab(tens)
+        ss.vec = tab(vec)
+        ss.s00 = tab(s00)
+        ss.sstress = tab(sstress)
+        ss.ds00 = np.gradient(tab(s00), lnx)
+        ss.dsstress = np.gradient(tab(sstress), lnx)
+        return self
 
     def set_custom_scalar_sources(
         self, custom_sources, source_names=None, source_ell_scales=None, frame="CDM", code_path=None

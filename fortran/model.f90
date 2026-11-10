@@ -102,6 +102,22 @@
         integer, allocatable :: custom_source_ell_scales(:)
     end type TCustomSourceParams
 
+    ! Tabulated cosmic string (USM) eigenmode source functions, used as active sources (no inflationary primordial part)
+    ! Source for k, tau: Theta(k,tau) = amp * F(x)/(x**gamma_w * sqrt(tau)), x = k*tau, F tabulated in ln x
+    type TStringSourceParams
+        logical :: active = .false.
+        integer :: nx = 0
+        real(dl) :: gamma_w = 0.25_dl
+        real(dl) :: amp = 1._dl
+        real(dl), allocatable :: lnx(:) ! ascending ln(k tau) grid
+        real(dl), allocatable :: tens(:) ! tensor anisotropic stress source Theta^T
+        real(dl), allocatable :: vec(:) ! vector anisotropic stress source Theta^V
+        real(dl), allocatable :: s00(:) ! scalar energy density source Theta_00
+        real(dl), allocatable :: sstress(:) ! scalar anisotropic stress source Theta^S
+        real(dl), allocatable :: ds00(:) ! d s00/d ln x
+        real(dl), allocatable :: dsstress(:) ! d sstress/d ln x
+    end type TStringSourceParams
+
     ! Non-linear corrections, either just P(k), or just CMB lensing/sources, or both
     integer, parameter :: NonLinear_none = 0, NonLinear_Pk = 1, NonLinear_Lens = 2
     integer, parameter :: NonLinear_both = 3
@@ -194,6 +210,7 @@
         type(TSourceWindowHolder), allocatable :: SourceWindows(:)
 
         type(TCustomSourceParams) :: CustomSources
+        type(TStringSourceParams) :: StringSource
     contains
     procedure, nopass :: PythonClass => CAMBparams_PythonClass
     procedure, nopass :: SelfPointer => CAMBparams_SelfPointer

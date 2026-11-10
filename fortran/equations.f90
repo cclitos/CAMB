@@ -43,8 +43,9 @@
 
     logical, parameter :: plot_evolve = .false. ! for outputting time evolution
 
-    integer, parameter :: basic_num_eqns = 4
+    integer, parameter :: basic_num_eqns = 5
     integer, parameter :: ix_etak = 1, ix_clxc = 2, ix_clxb = 3, ix_vb = 4 ! Scalar array indices for each quantity
+    integer, parameter :: ix_strD = 5 ! cosmic string momentum-like source variable (zero unless strings active)
     integer, parameter :: ixt_H = 1, ixt_shear = 2 ! tensor indices
 
     logical :: DoTensorNeutrinos = .true.
@@ -1130,6 +1131,75 @@
 
     end subroutine SwitchToMassiveNuApprox
 
+    function StringSourceValue(SS, tab, k, tau) result(val)
+    ! Cosmic string eigenmode source Theta(k,tau) = amp*F(x)/(x**gamma_w*sqrt(tau)), x = k*tau
+    ! F is tabulated (linear interpolation) on a ln x grid; zero outside the grid.
+    type(TStringSourceParams), intent(in) :: SS
+    real(dl), intent(in) :: tab(:)
+    real(dl), intent(in) :: k, tau
+    real(dl) :: val, x, lx, f, w
+    integer :: i, lo, hi
+
+    val = 0._dl
+    x = k*tau
+    if (x <= 0._dl) return
+    lx = log(x)
+    if (lx <= SS%lnx(1) .or. lx >= SS%lnx(SS%nx)) return
+    lo = 1
+    hi = SS%nx
+    do while (hi - lo > 1)
+        i = (lo + hi)/2
+        if (SS%lnx(i) > lx) then
+            hi = i
+        else
+            lo = i
+        end if
+    end do
+    w = (lx - SS%lnx(lo))/(SS%lnx(hi) - SS%lnx(lo))
+    f = (1._dl - w)*tab(lo) + w*tab(hi)
+    val = SS%amp*f/(x**SS%gamma_w*sqrt(tau))
+
+    end function StringSourceValue
+
+    subroutine StringScalarSource(SS, k, tau, E, Edot, S, Sdot)
+    ! Scalar cosmic string sources Theta_00 (E) and Theta^S (S) and their conformal time derivatives (amp included)
+    type(TStringSourceParams), intent(in) :: SS
+    real(dl), intent(in) :: k, tau
+    real(dl), intent(out) :: E, Edot, S, Sdot
+    real(dl) :: x, lx, w, pre, f, df
+    integer :: i, lo, hi
+
+    E = 0._dl
+    Edot = 0._dl
+    S = 0._dl
+    Sdot = 0._dl
+    x = k*tau
+    if (x <= 0._dl) return
+    lx = log(x)
+    if (lx <= SS%lnx(1) .or. lx >= SS%lnx(SS%nx)) return
+    lo = 1
+    hi = SS%nx
+    do while (hi - lo > 1)
+        i = (lo + hi)/2
+        if (SS%lnx(i) > lx) then
+            hi = i
+        else
+            lo = i
+        end if
+    end do
+    w = (lx - SS%lnx(lo))/(SS%lnx(hi) - SS%lnx(lo))
+    pre = SS%amp/(x**SS%gamma_w)
+    f = (1._dl - w)*SS%s00(lo) + w*SS%s00(hi)
+    df = (1._dl - w)*SS%ds00(lo) + w*SS%ds00(hi)
+    E = pre*f/sqrt(tau)
+    Edot = pre*(df - (SS%gamma_w + 0.5_dl)*f)/(tau*sqrt(tau))
+    f = (1._dl - w)*SS%sstress(lo) + w*SS%sstress(hi)
+    df = (1._dl - w)*SS%dsstress(lo) + w*SS%dsstress(hi)
+    S = pre*f/sqrt(tau)
+    Sdot = pre*(df - (SS%gamma_w + 0.5_dl)*f)/(tau*sqrt(tau))
+
+    end subroutine StringScalarSource
+
     subroutine MassiveNuVarsOut(EV, y, yprime, a, adotoa, grho, gpres, dgrho, dgq, dgpi, dgpi_diff, pidot_sum, &
         clxnu_all)
     implicit none
@@ -2106,6 +2176,10 @@
         y(EV%r_ix + 3) = initvec(i_aj3r)
     end if
 
+    ! cosmic string sources: purely active perturbations, no adiabatic initial conditions
+    y(ix_strD) = 0._dl
+    if (CP%StringSource%active) y(1:EV%nvar) = 0._dl
+
     if (CP%Num_Nu_massive == 0) return
 
     do nu_i = 1, CP%Nu_mass_eigenstates
@@ -2186,6 +2260,7 @@
     x = k*tau
 
     tens0 = 1
+    if (CP%StringSource%active) tens0 = 0
 
     yt(ixt_H) = tens0
     ! commented things are for the compensated mode with magnetic fields; can be neglected
@@ -2271,6 +2346,9 @@
     yv((EV%lmaxv - 1 + 1) + (EV%lmaxpolv - 1)*2 + 3 + 1 + 1) = pir
     yv((EV%lmaxv - 1 + 1) + (EV%lmaxpolv - 1)*2 + 3 + 1 + 2) = 3._dl/7*x*Magnetic*(1 - 1/bigR)
 
+    ! cosmic string sources: purely active, no initial vector mode
+    if (CP%StringSource%active) yv(2:EV%nvarv) = 0._dl
+
     end subroutine initialv
 
     subroutine outtransf(EV, y, tau, Arr)
@@ -2315,6 +2393,7 @@
     real(dl) E2, dopacity
     integer l, i, ind, ind2, off_ix, ix
     real(dl) dgs, sigmadot, dz
+    real(dl) str_E, str_Edot, str_S, str_Sdot, str_D, str_T
     real(dl) dgpi, dgrho_matter, grho_matter, clxnu, gpres_nu
     ! non-flat vars
     real(dl) cothxor ! 1/tau in flat case
@@ -2430,6 +2509,22 @@
     ! 8*pi*a*a*SUM[(rho_i+p_i)*v_i]
     dgq = dgq + grhog_t*qg + grhor_t*qr
 
+    ! Cosmic string source (pure perturbation, no background): Theta_00, Theta_D (momentum), Theta^S
+    ayprime(ix_strD) = 0._dl
+    str_E = 0._dl
+    str_Edot = 0._dl
+    str_S = 0._dl
+    str_Sdot = 0._dl
+    if (CP%StringSource%active) then
+        call StringScalarSource(CP%StringSource, k, tau, str_E, str_Edot, str_S, str_Sdot)
+        str_D = ay(ix_strD)
+        dgrho = dgrho + str_E
+        dgq = dgq - str_D/k
+        ! conservation: D' = -2H D - k^2/3 (T + 2 S), with T = (D - E')/H - E
+        str_T = (str_D - str_Edot)/adotoa - str_E
+        ayprime(ix_strD) = -2*adotoa*str_D - k2/3*(str_T + 2*str_S)
+    end if
+
     ! Photon mass density over baryon mass density
     photbar = grhog_t/grhob_t
     pb43 = 4._dl/3*photbar
@@ -2518,7 +2613,7 @@
             ! AL: First order slip seems to be fine here to 2e-4
 
             ! 8*pi*G*a*a*SUM[rho_i*sigma_i]
-            dgs = grhog_t*pig + grhor_t*pir
+            dgs = grhog_t*pig + grhor_t*pir - str_S
 
             ! Define shear derivative to first order
             sigmadot = -2*adotoa*sigma - dgs/k + etak
@@ -2835,9 +2930,9 @@
             dgq_de = 0
         end if
 
-        dgpi = grhor_t*pir + grhog_t*pig
+        dgpi = grhor_t*pir + grhog_t*pig - str_S
         dgpi_diff = 0 ! sum (3*p_nu -rho_nu)*pi_nu
-        pidot_sum = grhog_t*pigdot + grhor_t*pirdot
+        pidot_sum = grhog_t*pigdot + grhor_t*pirdot - str_Sdot - 2*adotoa*str_S ! string term gives d(dgpi)/dtau - 2H dgpi in diff_rhopi
         clxnu = 0
         if (State%CP%Num_Nu_massive /= 0) then
             call MassiveNuVarsOut(EV, ay, ayprime, a, adotoa, dgpi=dgpi, clxnu_all=clxnu, &
@@ -3130,6 +3225,7 @@
     ! Get the propagation equation for the shear
 
     rhopi = grhog_t*pig + grhor_t*pir + grhog_t*Magnetic
+    if (CP%StringSource%active) rhopi = rhopi + StringSourceValue(CP%StringSource, CP%StringSource%vec, k, tau)
 
     yvprime(2) = -2*adotoa*sigma - rhopi/k
 
@@ -3233,6 +3329,7 @@
     grhog_t = State%grhog/a2
 
     rhopi = grhog_t*pig
+    if (CP%StringSource%active) rhopi = rhopi + StringSourceValue(CP%StringSource, CP%StringSource%tens, k, tau)
 
     !  Neutrino equations:
     !  Anisotropic stress
