@@ -289,6 +289,9 @@ class StringSourceParams(CAMB_Structure):
         ("nx", c_int, "number of grid points"),
         ("gamma_w", c_double, "weight exponent gamma: Theta = amp * F(x) / (x^gamma sqrt(tau))"),
         ("amp", c_double, "overall amplitude"),
+        ("tau_collapse", c_double, "conformal time (Mpc) at which the network collapses; <= 0 for no collapse"),
+        ("collapse_width", c_double, "tanh width (Mpc) of the collapse window"),
+        ("w_decay", c_double, "equation of state of the decay-product fluid that absorbs the string energy and momentum"),
         ("lnx", AllocatableArrayDouble, "ln(k tau) grid"),
         ("tens", AllocatableArrayDouble, "tensor anisotropic stress F"),
         ("vec", AllocatableArrayDouble, "vector anisotropic stress F"),
@@ -1134,7 +1137,19 @@ class CAMBparams(F2003Class):
 
     _custom_source_name_dict: ClassVar[dict] = {}
 
-    def set_string_source(self, lnx, tens=None, vec=None, s00=None, sstress=None, gamma_w=0.25, amp=1.0):
+    def set_string_source(
+        self,
+        lnx,
+        tens=None,
+        vec=None,
+        s00=None,
+        sstress=None,
+        gamma_w=0.25,
+        amp=1.0,
+        tau_collapse=0.0,
+        collapse_width=None,
+        w_decay=0.0,
+    ):
         """
         Use tabulated cosmic string source functions as active sources, replacing the inflationary primordial
         perturbations. Each source is Theta(k, tau) = amp * F(x) / (x**gamma_w * sqrt(tau)) with x = k*tau and F
@@ -1146,7 +1161,15 @@ class CAMBparams(F2003Class):
         :param s00: F for the scalar energy density
         :param sstress: F for the scalar anisotropic stress
         :param gamma_w: weight exponent
-        :param amp: overall amplitude
+        :param amp: overall amplitude. CAMB's ODE tolerances are partly absolute, so if the tabulated sources are very
+            small (e.g. eigenmodes dominated by k*tau << 1, as for early network collapse) use a large amp (e.g. 1e10)
+            and divide the resulting C_l by amp**2; otherwise the source response is under-resolved.
+        :param tau_collapse: conformal time (Mpc) at which the whole network collapses; <= 0 for no collapse.
+            All sources are multiplied by W = [1 - tanh((tau - tau_collapse)/collapse_width)]/2. In the scalar sector
+            the string energy and momentum lost are transferred to a decay-product fluid with equation of state w_decay
+            (no anisotropic stress), so the total stress-energy stays conserved.
+        :param collapse_width: tanh width in Mpc (default 0.02*tau_collapse)
+        :param w_decay: equation of state of the decay products (0: non-relativistic remnant, 1/3: radiation)
         :return: self
         """
         import numpy as np
@@ -1162,6 +1185,9 @@ class CAMBparams(F2003Class):
         ss.nx = n
         ss.gamma_w = gamma_w
         ss.amp = amp
+        ss.tau_collapse = tau_collapse
+        ss.collapse_width = 0.02 * tau_collapse if collapse_width is None else collapse_width
+        ss.w_decay = w_decay
         ss.lnx = lnx
         ss.tens = tab(tens)
         ss.vec = tab(vec)

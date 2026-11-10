@@ -43,9 +43,10 @@
 
     logical, parameter :: plot_evolve = .false. ! for outputting time evolution
 
-    integer, parameter :: basic_num_eqns = 5
+    integer, parameter :: basic_num_eqns = 7
     integer, parameter :: ix_etak = 1, ix_clxc = 2, ix_clxb = 3, ix_vb = 4 ! Scalar array indices for each quantity
     integer, parameter :: ix_strD = 5 ! cosmic string momentum-like source variable (zero unless strings active)
+    integer, parameter :: ix_strR = 6, ix_strQ = 7 ! string collapse decay-product fluid: energy and momentum variables
     integer, parameter :: ixt_H = 1, ixt_shear = 2 ! tensor indices
 
     logical :: DoTensorNeutrinos = .true.
@@ -1137,7 +1138,7 @@
     type(TStringSourceParams), intent(in) :: SS
     real(dl), intent(in) :: tab(:)
     real(dl), intent(in) :: k, tau
-    real(dl) :: val, x, lx, f, w
+    real(dl) :: val, x, lx, f, w, W_c, Wdot
     integer :: i, lo, hi
 
     val = 0._dl
@@ -1158,8 +1159,32 @@
     w = (lx - SS%lnx(lo))/(SS%lnx(hi) - SS%lnx(lo))
     f = (1._dl - w)*tab(lo) + w*tab(hi)
     val = SS%amp*f/(x**SS%gamma_w*sqrt(tau))
+    if (SS%tau_collapse > 0._dl) then
+        call StringCollapseWindow(SS, tau, W_c, Wdot)
+        val = val*W_c
+    end if
 
     end function StringSourceValue
+
+    subroutine StringCollapseWindow(SS, tau, W, Wdot)
+    ! Network collapse window W = [1 - tanh((tau - tau_collapse)/width)]/2 and dW/dtau (W = 1 if no collapse)
+    type(TStringSourceParams), intent(in) :: SS
+    real(dl), intent(in) :: tau
+    real(dl), intent(out) :: W, Wdot
+    real(dl) :: u
+
+    W = 1._dl
+    Wdot = 0._dl
+    if (SS%tau_collapse <= 0._dl) return
+    u = (tau - SS%tau_collapse)/SS%collapse_width
+    if (u > 40._dl) then
+        W = 0._dl
+    else if (u > -40._dl) then
+        W = 0.5_dl*(1._dl - tanh(u))
+        Wdot = -0.5_dl/SS%collapse_width/cosh(u)**2
+    end if
+
+    end subroutine StringCollapseWindow
 
     subroutine StringScalarSource(SS, k, tau, E, Edot, S, Sdot)
     ! Scalar cosmic string sources Theta_00 (E) and Theta^S (S) and their conformal time derivatives (amp included)
@@ -2178,6 +2203,8 @@
 
     ! cosmic string sources: purely active perturbations, no adiabatic initial conditions
     y(ix_strD) = 0._dl
+    y(ix_strR) = 0._dl
+    y(ix_strQ) = 0._dl
     if (CP%StringSource%active) y(1:EV%nvar) = 0._dl
 
     if (CP%Num_Nu_massive == 0) return
@@ -2393,7 +2420,7 @@
     real(dl) E2, dopacity
     integer l, i, ind, ind2, off_ix, ix
     real(dl) dgs, sigmadot, dz
-    real(dl) str_E, str_Edot, str_S, str_Sdot, str_D, str_T
+    real(dl) str_E, str_Edot, str_S, str_Sdot, str_D, str_T, str_W, str_Wdot, str_R, str_Q
     real(dl) dgpi, dgrho_matter, grho_matter, clxnu, gpres_nu
     ! non-flat vars
     real(dl) cothxor ! 1/tau in flat case
@@ -2511,6 +2538,8 @@
 
     ! Cosmic string source (pure perturbation, no background): Theta_00, Theta_D (momentum), Theta^S
     ayprime(ix_strD) = 0._dl
+    ayprime(ix_strR) = 0._dl
+    ayprime(ix_strQ) = 0._dl
     str_E = 0._dl
     str_Edot = 0._dl
     str_S = 0._dl
@@ -2518,11 +2547,20 @@
     if (CP%StringSource%active) then
         call StringScalarSource(CP%StringSource, k, tau, str_E, str_Edot, str_S, str_Sdot)
         str_D = ay(ix_strD)
-        dgrho = dgrho + str_E
-        dgq = dgq - str_D/k
-        ! conservation: D' = -2H D - k^2/3 (T + 2 S), with T = (D - E')/H - E
+        ! conservation of the uncollapsed network: D' = -2H D - k^2/3 (T + 2 S), with T = (D - E')/H - E
         str_T = (str_D - str_Edot)/adotoa - str_E
         ayprime(ix_strD) = -2*adotoa*str_D - k2/3*(str_T + 2*str_S)
+        ! network collapse: the window removes the strings, and the energy and momentum they lose go into a
+        ! decay-product fluid (equation of state w_decay, no anisotropic stress), so the total is conserved
+        call StringCollapseWindow(CP%StringSource, tau, str_W, str_Wdot)
+        str_R = ay(ix_strR)
+        str_Q = ay(ix_strQ)
+        ayprime(ix_strR) = -adotoa*(1 + 3*CP%StringSource%w_decay)*str_R + str_Q - str_Wdot*str_E
+        ayprime(ix_strQ) = -2*adotoa*str_Q - k2*CP%StringSource%w_decay*str_R - str_Wdot*str_D
+        dgrho = dgrho + str_W*str_E + str_R
+        dgq = dgq - (str_W*str_D + str_Q)/k
+        str_Sdot = str_W*str_Sdot + str_Wdot*str_S
+        str_S = str_W*str_S
     end if
 
     ! Photon mass density over baryon mass density

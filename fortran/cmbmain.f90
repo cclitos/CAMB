@@ -720,6 +720,10 @@
     ! Make sure to start early in the radiation era.
     taustart = min(taustart, 0.1_dl)
 
+    ! Cosmic string collapse: start well before the network collapses so the source history is captured
+    if (CP%StringSource%active .and. CP%StringSource%tau_collapse > 0._dl) &
+        taustart = min(taustart, 1.d-2*CP%StringSource%tau_collapse)
+
     ! Start when massive neutrinos are strongly relativistic.
     if (CP%Num_Nu_massive > 0 .and. any(State%nu_masses(1:CP%Nu_mass_eigenstates) /= 0)) then
         taustart = min(taustart, 1.d-3/maxval(State%nu_masses(1:CP%Nu_mass_eigenstates))/State%adotrad)

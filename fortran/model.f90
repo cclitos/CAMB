@@ -109,6 +109,9 @@
         integer :: nx = 0
         real(dl) :: gamma_w = 0.25_dl
         real(dl) :: amp = 1._dl
+        real(dl) :: tau_collapse = 0._dl ! conformal time of network collapse (Mpc); <= 0 for no collapse
+        real(dl) :: collapse_width = 0._dl ! tanh width of the collapse window (Mpc)
+        real(dl) :: w_decay = 0._dl ! equation of state of the collapse products (scalar fluid absorbing the energy)
         real(dl), allocatable :: lnx(:) ! ascending ln(k tau) grid
         real(dl), allocatable :: tens(:) ! tensor anisotropic stress source Theta^T
         real(dl), allocatable :: vec(:) ! vector anisotropic stress source Theta^V
