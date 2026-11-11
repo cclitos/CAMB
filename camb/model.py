@@ -292,6 +292,8 @@ class StringSourceParams(CAMB_Structure):
         ("tau_collapse", c_double, "conformal time (Mpc) at which the network collapses; <= 0 for no collapse"),
         ("collapse_width", c_double, "tanh width (Mpc) of the collapse window"),
         ("w_decay", c_double, "equation of state of the decay-product fluid that absorbs the string energy and momentum"),
+        ("decay_p_over_m", c_double, "if > 0, decay products are a free-streaming gas injected with momentum p/m"),
+        ("decay_lmax", c_int, "maximum multipole of the decay-product gas hierarchy"),
         ("lnx", AllocatableArrayDouble, "ln(k tau) grid"),
         ("tens", AllocatableArrayDouble, "tensor anisotropic stress F"),
         ("vec", AllocatableArrayDouble, "vector anisotropic stress F"),
@@ -1149,6 +1151,8 @@ class CAMBparams(F2003Class):
         tau_collapse=0.0,
         collapse_width=None,
         w_decay=0.0,
+        decay_p_over_m=0.0,
+        decay_lmax=10,
     ):
         """
         Use tabulated cosmic string source functions as active sources, replacing the inflationary primordial
@@ -1170,6 +1174,11 @@ class CAMBparams(F2003Class):
             (no anisotropic stress), so the total stress-energy stays conserved.
         :param collapse_width: tanh width in Mpc (default 0.02*tau_collapse)
         :param w_decay: equation of state of the decay products (0: non-relativistic remnant, 1/3: radiation)
+        :param decay_p_over_m: if > 0, the decay products are instead a free-streaming gas of massive particles
+            injected at tau_collapse with momentum p/m = decay_p_over_m (then p ~ 1/a). They are evolved with a
+            Boltzmann hierarchy, so the equation of state w(a) = v^2/3, the pressure and the anisotropic stress
+            follow from v = p/E; w_decay is then ignored. 0 recovers the cold w_decay=0 fluid.
+        :param decay_lmax: maximum multipole of the decay-product hierarchy (used if decay_p_over_m > 0)
         :return: self
         """
         import numpy as np
@@ -1188,6 +1197,8 @@ class CAMBparams(F2003Class):
         ss.tau_collapse = tau_collapse
         ss.collapse_width = 0.02 * tau_collapse if collapse_width is None else collapse_width
         ss.w_decay = w_decay
+        ss.decay_p_over_m = decay_p_over_m
+        ss.decay_lmax = decay_lmax
         ss.lnx = lnx
         ss.tens = tab(tens)
         ss.vec = tab(vec)

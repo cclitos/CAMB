@@ -48,6 +48,7 @@
     integer, parameter :: ix_strD = 5 ! cosmic string momentum-like source variable (zero unless strings active)
     integer, parameter :: ix_strR = 6, ix_strQ = 7 ! string collapse decay-product fluid: energy and momentum variables
     integer, parameter :: ixt_H = 1, ixt_shear = 2 ! tensor indices
+    real(dl) :: str_a_collapse = 0._dl ! scale factor at string network collapse (set in GaugeInterface_Init)
 
     logical :: DoTensorNeutrinos = .true.
 
@@ -97,6 +98,8 @@
 
         ! array indices for massive neutrino equations
         integer nu_ix(max_nu), nu_pert_ix
+        integer :: strgas_ix = 0 ! index of l>=2 moments of the string decay-product gas (0 if not used)
+        integer :: strgas_lmax = 0
         integer nq(max_nu), lmaxnu_pert
         logical has_nu_relativistic
 
@@ -602,7 +605,33 @@
         end associate
     end if
 
+    if (CP%StringSource%active .and. CP%StringSource%tau_collapse > 0._dl) then
+        str_a_collapse = StringCollapseScaleFactor(CP%StringSource%tau_collapse)
+    else
+        str_a_collapse = 0._dl
+    end if
+
     end subroutine GaugeInterface_Init
+
+    function StringCollapseScaleFactor(tau_c) result(a_c)
+    ! scale factor at conformal time tau_c, by bisection in ln a on State%DeltaTime(0, a)
+    real(dl), intent(in) :: tau_c
+    real(dl) a_c, lo, hi, mid
+    integer i
+
+    lo = log(1.e-14_dl)
+    hi = 0._dl
+    do i = 1, 80
+        mid = (lo + hi)/2
+        if (State%DeltaTime(0._dl, exp(mid)) > tau_c) then
+            hi = mid
+        else
+            lo = mid
+        end if
+    end do
+    a_c = exp((lo + hi)/2)
+
+    end function StringCollapseScaleFactor
 
     subroutine SetupScalarArrayIndices(EV, max_num_eqns)
     ! Set up array indices after the lmax have been decided
@@ -715,6 +744,18 @@
         EV%has_nu_relativistic = .false.
     end if
 
+    ! Cosmic string decay-product gas: moments l=2..lmax (l=0,1 are ix_strR, ix_strQ)
+    if (CP%StringSource%active .and. CP%StringSource%tau_collapse > 0._dl .and. &
+        CP%StringSource%decay_p_over_m > 0._dl) then
+        EV%strgas_lmax = max(CP%StringSource%decay_lmax, 3)
+        EV%strgas_ix = neq + 1
+        neq = neq + EV%strgas_lmax - 1
+        maxeq = maxeq + EV%strgas_lmax - 1
+    else
+        EV%strgas_ix = 0
+        EV%strgas_lmax = 0
+    end if
+
     EV%ScalEqsToPropagate = neq
     if (present(max_num_eqns)) then
         max_num_eqns = maxeq
@@ -808,6 +849,10 @@
     end if
     if (CP%Evolve_delta_Ts) then
         yout(EVOut%Ts_ix) = y(EV%Ts_ix)
+    end if
+    if (EV%strgas_ix > 0 .and. EVOut%strgas_ix > 0) then
+        lmax = min(EV%strgas_lmax, EVOut%strgas_lmax)
+        yout(EVOut%strgas_ix:EVOut%strgas_ix + lmax - 2) = y(EV%strgas_ix:EV%strgas_ix + lmax - 2)
     end if
 
     end subroutine CopyScalarVariableArray
@@ -2421,6 +2466,7 @@
     integer l, i, ind, ind2, off_ix, ix
     real(dl) dgs, sigmadot, dz
     real(dl) str_E, str_Edot, str_S, str_Sdot, str_D, str_T, str_W, str_Wdot, str_R, str_Q
+    real(dl) str_v, str_Zm, str_Pi, str_Pidot
     real(dl) dgpi, dgrho_matter, grho_matter, clxnu, gpres_nu
     ! non-flat vars
     real(dl) cothxor ! 1/tau in flat case
@@ -2544,6 +2590,8 @@
     str_Edot = 0._dl
     str_S = 0._dl
     str_Sdot = 0._dl
+    str_Pi = 0._dl
+    str_Pidot = 0._dl
     if (CP%StringSource%active) then
         call StringScalarSource(CP%StringSource, k, tau, str_E, str_Edot, str_S, str_Sdot)
         str_D = ay(ix_strD)
@@ -2555,8 +2603,32 @@
         call StringCollapseWindow(CP%StringSource, tau, str_W, str_Wdot)
         str_R = ay(ix_strR)
         str_Q = ay(ix_strQ)
-        ayprime(ix_strR) = -adotoa*(1 + 3*CP%StringSource%w_decay)*str_R + str_Q - str_Wdot*str_E
-        ayprime(ix_strQ) = -2*adotoa*str_Q - k2*CP%StringSource%w_decay*str_R - str_Wdot*str_D
+        if (EV%strgas_ix > 0) then
+            ! free-streaming gas of particles injected with p/m = decay_p_over_m at a_collapse; v = p/E.
+            ! Energy-weighted moments R = 8 pi G a^2 delta rho, Q = -k 8 pi G a^2 (rho+p) v, and for l >= 2
+            ! Z_l = v-weighted moments in the units of Q. Anisotropic stress dgpi contribution = -v Z_2/k.
+            str_v = CP%StringSource%decay_p_over_m*str_a_collapse/a
+            str_v = str_v/sqrt(1 + str_v**2)
+            ix = EV%strgas_ix ! Z_2
+            ayprime(ix_strR) = -adotoa*(1 + str_v**2)*str_R + str_Q - str_Wdot*str_E
+            ayprime(ix_strQ) = -2*adotoa*str_Q - k2/3*str_v**2*str_R - 2*k/3*str_v*ay(ix) - str_Wdot*str_D
+            do l = 2, EV%strgas_lmax - 1
+                if (l == 2) then
+                    str_Zm = str_Q
+                else
+                    str_Zm = ay(ix + l - 3)
+                end if
+                ayprime(ix + l - 2) = -2*adotoa*ay(ix + l - 2) + str_v*k/(2*l + 1)* &
+                    (l*str_Zm - (l + 1)*ay(ix + l - 1))
+            end do
+            l = EV%strgas_lmax
+            ayprime(ix + l - 2) = -2*adotoa*ay(ix + l - 2) + str_v*k*ay(ix + l - 3) - (l + 1)*ay(ix + l - 2)/tau
+            str_Pi = -str_v*ay(ix)/k
+            str_Pidot = -(-adotoa*str_v*(1 - str_v**2)*ay(ix) + str_v*ayprime(ix))/k
+        else
+            ayprime(ix_strR) = -adotoa*(1 + 3*CP%StringSource%w_decay)*str_R + str_Q - str_Wdot*str_E
+            ayprime(ix_strQ) = -2*adotoa*str_Q - k2*CP%StringSource%w_decay*str_R - str_Wdot*str_D
+        end if
         dgrho = dgrho + str_W*str_E + str_R
         dgq = dgq - (str_W*str_D + str_Q)/k
         str_Sdot = str_W*str_Sdot + str_Wdot*str_S
@@ -2651,7 +2723,7 @@
             ! AL: First order slip seems to be fine here to 2e-4
 
             ! 8*pi*G*a*a*SUM[rho_i*sigma_i]
-            dgs = grhog_t*pig + grhor_t*pir - str_S
+            dgs = grhog_t*pig + grhor_t*pir - str_S + str_Pi
 
             ! Define shear derivative to first order
             sigmadot = -2*adotoa*sigma - dgs/k + etak
@@ -2968,9 +3040,10 @@
             dgq_de = 0
         end if
 
-        dgpi = grhor_t*pir + grhog_t*pig - str_S
+        dgpi = grhor_t*pir + grhog_t*pig - str_S + str_Pi
         dgpi_diff = 0 ! sum (3*p_nu -rho_nu)*pi_nu
-        pidot_sum = grhog_t*pigdot + grhor_t*pirdot - str_Sdot - 2*adotoa*str_S ! string term gives d(dgpi)/dtau - 2H dgpi in diff_rhopi
+        ! string terms give d(dgpi)/dtau - 2H dgpi in diff_rhopi
+        pidot_sum = grhog_t*pigdot + grhor_t*pirdot - str_Sdot - 2*adotoa*str_S + str_Pidot + 2*adotoa*str_Pi
         clxnu = 0
         if (State%CP%Num_Nu_massive /= 0) then
             call MassiveNuVarsOut(EV, ay, ayprime, a, adotoa, dgpi=dgpi, clxnu_all=clxnu, &

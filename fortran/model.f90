@@ -112,6 +112,10 @@
         real(dl) :: tau_collapse = 0._dl ! conformal time of network collapse (Mpc); <= 0 for no collapse
         real(dl) :: collapse_width = 0._dl ! tanh width of the collapse window (Mpc)
         real(dl) :: w_decay = 0._dl ! equation of state of the collapse products (scalar fluid absorbing the energy)
+        ! If decay_p_over_m > 0 the collapse products are instead a free-streaming gas of particles injected with
+        ! momentum p/m = decay_p_over_m at tau_collapse (p ~ 1/a afterwards), evolved with a Boltzmann hierarchy
+        real(dl) :: decay_p_over_m = 0._dl
+        integer :: decay_lmax = 10 ! maximum multipole of the decay-product hierarchy
         real(dl), allocatable :: lnx(:) ! ascending ln(k tau) grid
         real(dl), allocatable :: tens(:) ! tensor anisotropic stress source Theta^T
         real(dl), allocatable :: vec(:) ! vector anisotropic stress source Theta^V
