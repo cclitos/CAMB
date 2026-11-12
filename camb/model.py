@@ -294,6 +294,10 @@ class StringSourceParams(CAMB_Structure):
         ("w_decay", c_double, "equation of state of the decay-product fluid that absorbs the string energy and momentum"),
         ("decay_p_over_m", c_double, "if > 0, decay products are a free-streaming gas injected with momentum p/m"),
         ("decay_lmax", c_int, "maximum multipole of the decay-product gas hierarchy"),
+        ("decay_nbins", c_int, "number of momentum bins of the decay-product gas (0: single decay_p_over_m)"),
+        ("decay_p_bins", c_double * 8, "p/m at tau_collapse for each momentum bin"),
+        ("decay_w_bins", c_double * 8, "fraction of the released string energy going into each momentum bin"),
+        ("remnant_only", c_bool, "no string network: only the decay-product gas, created at tau_collapse"),
         ("lnx", AllocatableArrayDouble, "ln(k tau) grid"),
         ("tens", AllocatableArrayDouble, "tensor anisotropic stress F"),
         ("vec", AllocatableArrayDouble, "vector anisotropic stress F"),
@@ -1153,6 +1157,9 @@ class CAMBparams(F2003Class):
         w_decay=0.0,
         decay_p_over_m=0.0,
         decay_lmax=10,
+        decay_p_bins=None,
+        decay_w_bins=None,
+        remnant_only=False,
     ):
         """
         Use tabulated cosmic string source functions as active sources, replacing the inflationary primordial
@@ -1179,6 +1186,17 @@ class CAMBparams(F2003Class):
             Boltzmann hierarchy, so the equation of state w(a) = v^2/3, the pressure and the anisotropic stress
             follow from v = p/E; w_decay is then ignored. 0 recovers the cold w_decay=0 fluid.
         :param decay_lmax: maximum multipole of the decay-product hierarchy (used if decay_p_over_m > 0)
+        :param decay_p_bins: optional momentum distribution of the decay products: up to 8 values of p/m at
+            tau_collapse, e.g. sampling an emission spectrum F(x), x = p/H, at H = m. Overrides decay_p_over_m.
+        :param decay_w_bins: fraction of the released string energy and momentum going into each bin. With a string
+            network these must sum to one (add a bin with p/m >> 1 for the energy radiated into hard particles), so
+            that the total stress-energy is conserved. The late-time cold number per unit released energy is
+            sum(w / sqrt(1 + (p/m)^2)).
+        :param remnant_only: if True there is no string network (lnx and the tabulated sources are ignored; pass any
+            grid). The decay-product gas alone is created at tau_collapse with a k-independent energy perturbation
+            8 pi G a^2 delta rho = amp * w in each bin, no momentum, and everything else unperturbed. This is white
+            noise in the gas energy, so use a primordial spectrum P ~ k^3 as for the eigenmode sources. The weights
+            need not sum to one. Scalars only.
         :return: self
         """
         import numpy as np
@@ -1199,6 +1217,24 @@ class CAMBparams(F2003Class):
         ss.w_decay = w_decay
         ss.decay_p_over_m = decay_p_over_m
         ss.decay_lmax = decay_lmax
+        if decay_p_bins is not None:
+            pb = np.atleast_1d(np.asarray(decay_p_bins, dtype=np.float64))
+            wb = np.ones(1) if decay_w_bins is None else np.atleast_1d(np.asarray(decay_w_bins, dtype=np.float64))
+            if pb.size != wb.size or not 1 <= pb.size <= 8:
+                raise ValueError("decay_p_bins and decay_w_bins must have the same length, between 1 and 8")
+            if tau_collapse <= 0:
+                raise ValueError("decay_p_bins requires tau_collapse > 0")
+            if not remnant_only and abs(wb.sum() - 1) > 1e-8:
+                raise ValueError("decay_w_bins must sum to one when there is a string network")
+            ss.decay_nbins = pb.size
+            for i in range(8):
+                ss.decay_p_bins[i] = pb[i] if i < pb.size else 0.0
+                ss.decay_w_bins[i] = wb[i] if i < pb.size else 0.0
+        else:
+            ss.decay_nbins = 0
+        if remnant_only and (tau_collapse <= 0 or (decay_p_bins is None and decay_p_over_m <= 0)):
+            raise ValueError("remnant_only requires tau_collapse > 0 and decay_p_bins or decay_p_over_m")
+        ss.remnant_only = remnant_only
         ss.lnx = lnx
         ss.tens = tab(tens)
         ss.vec = tab(vec)

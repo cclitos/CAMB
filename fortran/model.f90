@@ -116,6 +116,16 @@
         ! momentum p/m = decay_p_over_m at tau_collapse (p ~ 1/a afterwards), evolved with a Boltzmann hierarchy
         real(dl) :: decay_p_over_m = 0._dl
         integer :: decay_lmax = 10 ! maximum multipole of the decay-product hierarchy
+        ! Optional momentum distribution of the decay products: decay_nbins > 0 momentum bins with p/m = decay_p_bins
+        ! at tau_collapse, each receiving the fraction decay_w_bins of the released string energy and momentum
+        ! (the weights should sum to one for the total stress-energy to be conserved); overrides decay_p_over_m
+        integer :: decay_nbins = 0
+        real(dl) :: decay_p_bins(8) = 0._dl
+        real(dl) :: decay_w_bins(8) = 0._dl
+        ! remnant_only: no string network at all. The decay-product gas alone is created at tau_collapse with a
+        ! k-independent (white noise) energy perturbation 8 pi G a^2 delta rho = amp*decay_w_bins and no momentum,
+        ! everything else unperturbed (an isocurvature-like initial condition set at tau_collapse)
+        logical :: remnant_only = .false.
         real(dl), allocatable :: lnx(:) ! ascending ln(k tau) grid
         real(dl), allocatable :: tens(:) ! tensor anisotropic stress source Theta^T
         real(dl), allocatable :: vec(:) ! vector anisotropic stress source Theta^V

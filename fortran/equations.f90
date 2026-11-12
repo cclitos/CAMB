@@ -100,6 +100,7 @@
         integer nu_ix(max_nu), nu_pert_ix
         integer :: strgas_ix = 0 ! index of l>=2 moments of the string decay-product gas (0 if not used)
         integer :: strgas_lmax = 0
+        integer :: strgas_nbins = 0 ! number of momentum bins of the decay-product gas
         integer nq(max_nu), lmaxnu_pert
         logical has_nu_relativistic
 
@@ -633,6 +634,20 @@
 
     end function StringCollapseScaleFactor
 
+    function StringGasNumBins() result(nb)
+    ! number of momentum bins of the string decay-product gas (0 if the gas is not used)
+    integer nb
+
+    nb = 0
+    if (.not. CP%StringSource%active .or. CP%StringSource%tau_collapse <= 0._dl) return
+    if (CP%StringSource%decay_nbins > 0) then
+        nb = min(CP%StringSource%decay_nbins, size(CP%StringSource%decay_p_bins))
+    else if (CP%StringSource%decay_p_over_m > 0._dl) then
+        nb = 1
+    end if
+
+    end function StringGasNumBins
+
     subroutine SetupScalarArrayIndices(EV, max_num_eqns)
     ! Set up array indices after the lmax have been decided
     use MassiveNu
@@ -744,13 +759,14 @@
         EV%has_nu_relativistic = .false.
     end if
 
-    ! Cosmic string decay-product gas: moments l=2..lmax (l=0,1 are ix_strR, ix_strQ)
-    if (CP%StringSource%active .and. CP%StringSource%tau_collapse > 0._dl .and. &
-        CP%StringSource%decay_p_over_m > 0._dl) then
+    ! Cosmic string decay-product gas, one Boltzmann hierarchy per momentum bin. Bin 1 has l=0,1 in ix_strR, ix_strQ
+    ! and l=2..lmax at strgas_ix; each further bin has a block (R, Q, Z_2..Z_lmax) of lmax+1 variables after that
+    EV%strgas_nbins = StringGasNumBins()
+    if (EV%strgas_nbins > 0) then
         EV%strgas_lmax = max(CP%StringSource%decay_lmax, 3)
         EV%strgas_ix = neq + 1
-        neq = neq + EV%strgas_lmax - 1
-        maxeq = maxeq + EV%strgas_lmax - 1
+        neq = neq + EV%strgas_lmax - 1 + (EV%strgas_nbins - 1)*(EV%strgas_lmax + 1)
+        maxeq = maxeq + EV%strgas_lmax - 1 + (EV%strgas_nbins - 1)*(EV%strgas_lmax + 1)
     else
         EV%strgas_ix = 0
         EV%strgas_lmax = 0
@@ -851,8 +867,9 @@
         yout(EVOut%Ts_ix) = y(EV%Ts_ix)
     end if
     if (EV%strgas_ix > 0 .and. EVOut%strgas_ix > 0) then
-        lmax = min(EV%strgas_lmax, EVOut%strgas_lmax)
-        yout(EVOut%strgas_ix:EVOut%strgas_ix + lmax - 2) = y(EV%strgas_ix:EV%strgas_ix + lmax - 2)
+        ! the gas layout (lmax, number of bins) is the same for all approximation schemes
+        lmax = EV%strgas_lmax - 1 + (EV%strgas_nbins - 1)*(EV%strgas_lmax + 1)
+        yout(EVOut%strgas_ix:EVOut%strgas_ix + lmax - 1) = y(EV%strgas_ix:EV%strgas_ix + lmax - 1)
     end if
 
     end subroutine CopyScalarVariableArray
@@ -2466,7 +2483,8 @@
     integer l, i, ind, ind2, off_ix, ix
     real(dl) dgs, sigmadot, dz
     real(dl) str_E, str_Edot, str_S, str_Sdot, str_D, str_T, str_W, str_Wdot, str_R, str_Q
-    real(dl) str_v, str_Zm, str_Pi, str_Pidot
+    real(dl) str_v, str_Zm, str_Pi, str_Pidot, str_wb
+    integer ib, ixR, ixQ, lstr
     real(dl) dgpi, dgrho_matter, grho_matter, clxnu, gpres_nu
     ! non-flat vars
     real(dl) cothxor ! 1/tau in flat case
@@ -2593,46 +2611,83 @@
     str_Pi = 0._dl
     str_Pidot = 0._dl
     if (CP%StringSource%active) then
-        call StringScalarSource(CP%StringSource, k, tau, str_E, str_Edot, str_S, str_Sdot)
-        str_D = ay(ix_strD)
-        ! conservation of the uncollapsed network: D' = -2H D - k^2/3 (T + 2 S), with T = (D - E')/H - E
-        str_T = (str_D - str_Edot)/adotoa - str_E
-        ayprime(ix_strD) = -2*adotoa*str_D - k2/3*(str_T + 2*str_S)
-        ! network collapse: the window removes the strings, and the energy and momentum they lose go into a
-        ! decay-product fluid (equation of state w_decay, no anisotropic stress), so the total is conserved
         call StringCollapseWindow(CP%StringSource, tau, str_W, str_Wdot)
-        str_R = ay(ix_strR)
-        str_Q = ay(ix_strQ)
-        if (EV%strgas_ix > 0) then
-            ! free-streaming gas of particles injected with p/m = decay_p_over_m at a_collapse; v = p/E.
-            ! Energy-weighted moments R = 8 pi G a^2 delta rho, Q = -k 8 pi G a^2 (rho+p) v, and for l >= 2
-            ! Z_l = v-weighted moments in the units of Q. Anisotropic stress dgpi contribution = -v Z_2/k.
-            str_v = CP%StringSource%decay_p_over_m*str_a_collapse/a
-            str_v = str_v/sqrt(1 + str_v**2)
-            ix = EV%strgas_ix ! Z_2
-            ayprime(ix_strR) = -adotoa*(1 + str_v**2)*str_R + str_Q - str_Wdot*str_E
-            ayprime(ix_strQ) = -2*adotoa*str_Q - k2/3*str_v**2*str_R - 2*k/3*str_v*ay(ix) - str_Wdot*str_D
-            do l = 2, EV%strgas_lmax - 1
-                if (l == 2) then
-                    str_Zm = str_Q
-                else
-                    str_Zm = ay(ix + l - 3)
-                end if
-                ayprime(ix + l - 2) = -2*adotoa*ay(ix + l - 2) + str_v*k/(2*l + 1)* &
-                    (l*str_Zm - (l + 1)*ay(ix + l - 1))
-            end do
-            l = EV%strgas_lmax
-            ayprime(ix + l - 2) = -2*adotoa*ay(ix + l - 2) + str_v*k*ay(ix + l - 3) - (l + 1)*ay(ix + l - 2)/tau
-            str_Pi = -str_v*ay(ix)/k
-            str_Pidot = -(-adotoa*str_v*(1 - str_v**2)*ay(ix) + str_v*ayprime(ix))/k
+        if (CP%StringSource%remnant_only) then
+            ! no network: the gas is created at tau_collapse with a white-noise energy perturbation amp*weight
+            str_E = CP%StringSource%amp
+            str_D = 0._dl
         else
+            call StringScalarSource(CP%StringSource, k, tau, str_E, str_Edot, str_S, str_Sdot)
+            str_D = ay(ix_strD)
+            ! conservation of the uncollapsed network: D' = -2H D - k^2/3 (T + 2 S), with T = (D - E')/H - E
+            str_T = (str_D - str_Edot)/adotoa - str_E
+            ayprime(ix_strD) = -2*adotoa*str_D - k2/3*(str_T + 2*str_S)
+        end if
+        ! network collapse: the window removes the strings, and the energy and momentum they lose go into the
+        ! decay products (a fluid with equation of state w_decay, or a free-streaming gas), conserving the total
+        str_R = 0._dl
+        str_Q = 0._dl
+        if (EV%strgas_ix > 0) then
+            ! free-streaming gas of particles injected with momentum p/m at a_collapse, in momentum bins; v = p/E.
+            ! For each bin, energy-weighted moments R = 8 pi G a^2 delta rho, Q = -k 8 pi G a^2 (rho+p) v, and for
+            ! l >= 2 Z_l = v-weighted moments in the units of Q. Anisotropic stress dgpi contribution = -v Z_2/k.
+            lstr = EV%strgas_lmax
+            do ib = 1, EV%strgas_nbins
+                if (CP%StringSource%decay_nbins > 0) then
+                    str_v = CP%StringSource%decay_p_bins(ib)
+                    str_wb = CP%StringSource%decay_w_bins(ib)
+                else
+                    str_v = CP%StringSource%decay_p_over_m
+                    str_wb = 1._dl
+                end if
+                str_v = str_v*str_a_collapse/a
+                str_v = str_v/sqrt(1 + str_v**2)
+                if (ib == 1) then
+                    ixR = ix_strR
+                    ixQ = ix_strQ
+                    ix = EV%strgas_ix ! Z_2
+                else
+                    ixR = EV%strgas_ix + lstr - 1 + (ib - 2)*(lstr + 1)
+                    ixQ = ixR + 1
+                    ix = ixR + 2 ! Z_2
+                end if
+                ayprime(ixR) = -adotoa*(1 + str_v**2)*ay(ixR) + ay(ixQ) - str_wb*str_Wdot*str_E
+                ayprime(ixQ) = -2*adotoa*ay(ixQ) - k2/3*str_v**2*ay(ixR) - 2*k/3*str_v*ay(ix) &
+                    - str_wb*str_Wdot*str_D
+                do l = 2, lstr - 1
+                    if (l == 2) then
+                        str_Zm = ay(ixQ)
+                    else
+                        str_Zm = ay(ix + l - 3)
+                    end if
+                    ayprime(ix + l - 2) = -2*adotoa*ay(ix + l - 2) + str_v*k/(2*l + 1)* &
+                        (l*str_Zm - (l + 1)*ay(ix + l - 1))
+                end do
+                l = lstr
+                ayprime(ix + l - 2) = -2*adotoa*ay(ix + l - 2) + str_v*k*ay(ix + l - 3) - (l + 1)*ay(ix + l - 2)/tau
+                str_R = str_R + ay(ixR)
+                str_Q = str_Q + ay(ixQ)
+                str_Pi = str_Pi - str_v*ay(ix)/k
+                str_Pidot = str_Pidot - (-adotoa*str_v*(1 - str_v**2)*ay(ix) + str_v*ayprime(ix))/k
+            end do
+        else
+            str_R = ay(ix_strR)
+            str_Q = ay(ix_strQ)
             ayprime(ix_strR) = -adotoa*(1 + 3*CP%StringSource%w_decay)*str_R + str_Q - str_Wdot*str_E
             ayprime(ix_strQ) = -2*adotoa*str_Q - k2*CP%StringSource%w_decay*str_R - str_Wdot*str_D
         end if
-        dgrho = dgrho + str_W*str_E + str_R
-        dgq = dgq - (str_W*str_D + str_Q)/k
-        str_Sdot = str_W*str_Sdot + str_Wdot*str_S
-        str_S = str_W*str_S
+        if (CP%StringSource%remnant_only) then
+            ! only the decay products gravitate
+            dgrho = dgrho + str_R
+            dgq = dgq - str_Q/k
+            str_S = 0._dl
+            str_Sdot = 0._dl
+        else
+            dgrho = dgrho + str_W*str_E + str_R
+            dgq = dgq - (str_W*str_D + str_Q)/k
+            str_Sdot = str_W*str_Sdot + str_Wdot*str_S
+            str_S = str_W*str_S
+        end if
     end if
 
     ! Photon mass density over baryon mass density
