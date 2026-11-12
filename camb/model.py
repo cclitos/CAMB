@@ -278,6 +278,36 @@ class CustomSources(CAMB_Structure):
     )
 
 
+class StringSourceParams(CAMB_Structure):
+    """
+    Tabulated cosmic string (unconnected segment model) eigenmode source functions.
+    Don't change this directly; use :meth:`.model.CAMBparams.set_string_source`.
+    """
+
+    _fields_ = (
+        ("active", c_bool, "whether the string source is used (replaces inflationary initial conditions)"),
+        ("nx", c_int, "number of grid points"),
+        ("gamma_w", c_double, "weight exponent gamma: Theta = amp * F(x) / (x^gamma sqrt(tau))"),
+        ("amp", c_double, "overall amplitude"),
+        ("tau_collapse", c_double, "conformal time (Mpc) at which the network collapses; <= 0 for no collapse"),
+        ("collapse_width", c_double, "tanh width (Mpc) of the collapse window"),
+        ("w_decay", c_double, "equation of state of the decay-product fluid that absorbs the string energy and momentum"),
+        ("decay_p_over_m", c_double, "if > 0, decay products are a free-streaming gas injected with momentum p/m"),
+        ("decay_lmax", c_int, "maximum multipole of the decay-product gas hierarchy"),
+        ("decay_nbins", c_int, "number of momentum bins of the decay-product gas (0: single decay_p_over_m)"),
+        ("decay_p_bins", c_double * 8, "p/m at tau_collapse for each momentum bin"),
+        ("decay_w_bins", c_double * 8, "fraction of the released string energy going into each momentum bin"),
+        ("remnant_only", c_bool, "no string network: only the decay-product gas, created at tau_collapse"),
+        ("lnx", AllocatableArrayDouble, "ln(k tau) grid"),
+        ("tens", AllocatableArrayDouble, "tensor anisotropic stress F"),
+        ("vec", AllocatableArrayDouble, "vector anisotropic stress F"),
+        ("s00", AllocatableArrayDouble, "scalar density F"),
+        ("sstress", AllocatableArrayDouble, "scalar anisotropic stress F"),
+        ("ds00", AllocatableArrayDouble, "dF/dln(x) for the scalar density"),
+        ("dsstress", AllocatableArrayDouble, "dF/dln(x) for the scalar anisotropic stress"),
+    )
+
+
 @fortran_class
 class CAMBparams(F2003Class):
     """
@@ -418,6 +448,7 @@ class CAMBparams(F2003Class):
         ("min_l_logl_sampling", c_int, "Minimum L to use log sampling for L"),
         ("SourceWindows", AllocatableObjectArray(SourceWindow)),
         ("CustomSources", CustomSources),
+        ("StringSource", StringSourceParams),
     )
 
     H0: float
@@ -1111,6 +1142,107 @@ class CAMBparams(F2003Class):
             return powers
 
     _custom_source_name_dict: ClassVar[dict] = {}
+
+    def set_string_source(
+        self,
+        lnx,
+        tens=None,
+        vec=None,
+        s00=None,
+        sstress=None,
+        gamma_w=0.25,
+        amp=1.0,
+        tau_collapse=0.0,
+        collapse_width=None,
+        w_decay=0.0,
+        decay_p_over_m=0.0,
+        decay_lmax=10,
+        decay_p_bins=None,
+        decay_w_bins=None,
+        remnant_only=False,
+    ):
+        """
+        Use tabulated cosmic string source functions as active sources, replacing the inflationary primordial
+        perturbations. Each source is Theta(k, tau) = amp * F(x) / (x**gamma_w * sqrt(tau)) with x = k*tau and F
+        tabulated on the ascending grid ln x.
+
+        :param lnx: ascending grid of ln(k tau)
+        :param tens: F for the tensor anisotropic stress (None for zero)
+        :param vec: F for the vector anisotropic stress
+        :param s00: F for the scalar energy density
+        :param sstress: F for the scalar anisotropic stress
+        :param gamma_w: weight exponent
+        :param amp: overall amplitude. CAMB's ODE tolerances are partly absolute, so if the tabulated sources are very
+            small (e.g. eigenmodes dominated by k*tau << 1, as for early network collapse) use a large amp (e.g. 1e10)
+            and divide the resulting C_l by amp**2; otherwise the source response is under-resolved.
+        :param tau_collapse: conformal time (Mpc) at which the whole network collapses; <= 0 for no collapse.
+            All sources are multiplied by W = [1 - tanh((tau - tau_collapse)/collapse_width)]/2. In the scalar sector
+            the string energy and momentum lost are transferred to a decay-product fluid with equation of state w_decay
+            (no anisotropic stress), so the total stress-energy stays conserved.
+        :param collapse_width: tanh width in Mpc (default 0.02*tau_collapse)
+        :param w_decay: equation of state of the decay products (0: non-relativistic remnant, 1/3: radiation)
+        :param decay_p_over_m: if > 0, the decay products are instead a free-streaming gas of massive particles
+            injected at tau_collapse with momentum p/m = decay_p_over_m (then p ~ 1/a). They are evolved with a
+            Boltzmann hierarchy, so the equation of state w(a) = v^2/3, the pressure and the anisotropic stress
+            follow from v = p/E; w_decay is then ignored. 0 recovers the cold w_decay=0 fluid.
+        :param decay_lmax: maximum multipole of the decay-product hierarchy (used if decay_p_over_m > 0)
+        :param decay_p_bins: optional momentum distribution of the decay products: up to 8 values of p/m at
+            tau_collapse, e.g. sampling an emission spectrum F(x), x = p/H, at H = m. Overrides decay_p_over_m.
+        :param decay_w_bins: fraction of the released string energy and momentum going into each bin. With a string
+            network these must sum to one (add a bin with p/m >> 1 for the energy radiated into hard particles), so
+            that the total stress-energy is conserved. The late-time cold number per unit released energy is
+            sum(w / sqrt(1 + (p/m)^2)).
+        :param remnant_only: if True there is no string network (lnx and the tabulated sources are ignored; pass any
+            grid). The decay-product gas alone is created at tau_collapse with a k-independent energy perturbation
+            8 pi G a^2 delta rho = amp * w in each bin, no momentum, and everything else unperturbed. This is white
+            noise in the gas energy, so use a primordial spectrum P ~ k^3 as for the eigenmode sources. The weights
+            need not sum to one. Scalars only.
+        :return: self
+        """
+        import numpy as np
+
+        lnx = np.ascontiguousarray(lnx, dtype=np.float64)
+        n = lnx.size
+
+        def tab(a):
+            return np.zeros(n) if a is None else np.ascontiguousarray(a, dtype=np.float64)
+
+        ss = self.StringSource
+        ss.active = True
+        ss.nx = n
+        ss.gamma_w = gamma_w
+        ss.amp = amp
+        ss.tau_collapse = tau_collapse
+        ss.collapse_width = 0.02 * tau_collapse if collapse_width is None else collapse_width
+        ss.w_decay = w_decay
+        ss.decay_p_over_m = decay_p_over_m
+        ss.decay_lmax = decay_lmax
+        if decay_p_bins is not None:
+            pb = np.atleast_1d(np.asarray(decay_p_bins, dtype=np.float64))
+            wb = np.ones(1) if decay_w_bins is None else np.atleast_1d(np.asarray(decay_w_bins, dtype=np.float64))
+            if pb.size != wb.size or not 1 <= pb.size <= 8:
+                raise ValueError("decay_p_bins and decay_w_bins must have the same length, between 1 and 8")
+            if tau_collapse <= 0:
+                raise ValueError("decay_p_bins requires tau_collapse > 0")
+            if not remnant_only and abs(wb.sum() - 1) > 1e-8:
+                raise ValueError("decay_w_bins must sum to one when there is a string network")
+            ss.decay_nbins = pb.size
+            for i in range(8):
+                ss.decay_p_bins[i] = pb[i] if i < pb.size else 0.0
+                ss.decay_w_bins[i] = wb[i] if i < pb.size else 0.0
+        else:
+            ss.decay_nbins = 0
+        if remnant_only and (tau_collapse <= 0 or (decay_p_bins is None and decay_p_over_m <= 0)):
+            raise ValueError("remnant_only requires tau_collapse > 0 and decay_p_bins or decay_p_over_m")
+        ss.remnant_only = remnant_only
+        ss.lnx = lnx
+        ss.tens = tab(tens)
+        ss.vec = tab(vec)
+        ss.s00 = tab(s00)
+        ss.sstress = tab(sstress)
+        ss.ds00 = np.gradient(tab(s00), lnx)
+        ss.dsstress = np.gradient(tab(sstress), lnx)
+        return self
 
     def set_custom_scalar_sources(
         self, custom_sources, source_names=None, source_ell_scales=None, frame="CDM", code_path=None

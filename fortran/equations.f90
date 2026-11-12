@@ -43,9 +43,12 @@
 
     logical, parameter :: plot_evolve = .false. ! for outputting time evolution
 
-    integer, parameter :: basic_num_eqns = 4
+    integer, parameter :: basic_num_eqns = 7
     integer, parameter :: ix_etak = 1, ix_clxc = 2, ix_clxb = 3, ix_vb = 4 ! Scalar array indices for each quantity
+    integer, parameter :: ix_strD = 5 ! cosmic string momentum-like source variable (zero unless strings active)
+    integer, parameter :: ix_strR = 6, ix_strQ = 7 ! string collapse decay-product fluid: energy and momentum variables
     integer, parameter :: ixt_H = 1, ixt_shear = 2 ! tensor indices
+    real(dl) :: str_a_collapse = 0._dl ! scale factor at string network collapse (set in GaugeInterface_Init)
 
     logical :: DoTensorNeutrinos = .true.
 
@@ -95,6 +98,9 @@
 
         ! array indices for massive neutrino equations
         integer nu_ix(max_nu), nu_pert_ix
+        integer :: strgas_ix = 0 ! index of l>=2 moments of the string decay-product gas (0 if not used)
+        integer :: strgas_lmax = 0
+        integer :: strgas_nbins = 0 ! number of momentum bins of the decay-product gas
         integer nq(max_nu), lmaxnu_pert
         logical has_nu_relativistic
 
@@ -600,7 +606,47 @@
         end associate
     end if
 
+    if (CP%StringSource%active .and. CP%StringSource%tau_collapse > 0._dl) then
+        str_a_collapse = StringCollapseScaleFactor(CP%StringSource%tau_collapse)
+    else
+        str_a_collapse = 0._dl
+    end if
+
     end subroutine GaugeInterface_Init
+
+    function StringCollapseScaleFactor(tau_c) result(a_c)
+    ! scale factor at conformal time tau_c, by bisection in ln a on State%DeltaTime(0, a)
+    real(dl), intent(in) :: tau_c
+    real(dl) a_c, lo, hi, mid
+    integer i
+
+    lo = log(1.e-14_dl)
+    hi = 0._dl
+    do i = 1, 80
+        mid = (lo + hi)/2
+        if (State%DeltaTime(0._dl, exp(mid)) > tau_c) then
+            hi = mid
+        else
+            lo = mid
+        end if
+    end do
+    a_c = exp((lo + hi)/2)
+
+    end function StringCollapseScaleFactor
+
+    function StringGasNumBins() result(nb)
+    ! number of momentum bins of the string decay-product gas (0 if the gas is not used)
+    integer nb
+
+    nb = 0
+    if (.not. CP%StringSource%active .or. CP%StringSource%tau_collapse <= 0._dl) return
+    if (CP%StringSource%decay_nbins > 0) then
+        nb = min(CP%StringSource%decay_nbins, size(CP%StringSource%decay_p_bins))
+    else if (CP%StringSource%decay_p_over_m > 0._dl) then
+        nb = 1
+    end if
+
+    end function StringGasNumBins
 
     subroutine SetupScalarArrayIndices(EV, max_num_eqns)
     ! Set up array indices after the lmax have been decided
@@ -713,6 +759,19 @@
         EV%has_nu_relativistic = .false.
     end if
 
+    ! Cosmic string decay-product gas, one Boltzmann hierarchy per momentum bin. Bin 1 has l=0,1 in ix_strR, ix_strQ
+    ! and l=2..lmax at strgas_ix; each further bin has a block (R, Q, Z_2..Z_lmax) of lmax+1 variables after that
+    EV%strgas_nbins = StringGasNumBins()
+    if (EV%strgas_nbins > 0) then
+        EV%strgas_lmax = max(CP%StringSource%decay_lmax, 3)
+        EV%strgas_ix = neq + 1
+        neq = neq + EV%strgas_lmax - 1 + (EV%strgas_nbins - 1)*(EV%strgas_lmax + 1)
+        maxeq = maxeq + EV%strgas_lmax - 1 + (EV%strgas_nbins - 1)*(EV%strgas_lmax + 1)
+    else
+        EV%strgas_ix = 0
+        EV%strgas_lmax = 0
+    end if
+
     EV%ScalEqsToPropagate = neq
     if (present(max_num_eqns)) then
         max_num_eqns = maxeq
@@ -806,6 +865,11 @@
     end if
     if (CP%Evolve_delta_Ts) then
         yout(EVOut%Ts_ix) = y(EV%Ts_ix)
+    end if
+    if (EV%strgas_ix > 0 .and. EVOut%strgas_ix > 0) then
+        ! the gas layout (lmax, number of bins) is the same for all approximation schemes
+        lmax = EV%strgas_lmax - 1 + (EV%strgas_nbins - 1)*(EV%strgas_lmax + 1)
+        yout(EVOut%strgas_ix:EVOut%strgas_ix + lmax - 1) = y(EV%strgas_ix:EV%strgas_ix + lmax - 1)
     end if
 
     end subroutine CopyScalarVariableArray
@@ -1129,6 +1193,99 @@
     y = yout
 
     end subroutine SwitchToMassiveNuApprox
+
+    function StringSourceValue(SS, tab, k, tau) result(val)
+    ! Cosmic string eigenmode source Theta(k,tau) = amp*F(x)/(x**gamma_w*sqrt(tau)), x = k*tau
+    ! F is tabulated (linear interpolation) on a ln x grid; zero outside the grid.
+    type(TStringSourceParams), intent(in) :: SS
+    real(dl), intent(in) :: tab(:)
+    real(dl), intent(in) :: k, tau
+    real(dl) :: val, x, lx, f, w, W_c, Wdot
+    integer :: i, lo, hi
+
+    val = 0._dl
+    x = k*tau
+    if (x <= 0._dl) return
+    lx = log(x)
+    if (lx <= SS%lnx(1) .or. lx >= SS%lnx(SS%nx)) return
+    lo = 1
+    hi = SS%nx
+    do while (hi - lo > 1)
+        i = (lo + hi)/2
+        if (SS%lnx(i) > lx) then
+            hi = i
+        else
+            lo = i
+        end if
+    end do
+    w = (lx - SS%lnx(lo))/(SS%lnx(hi) - SS%lnx(lo))
+    f = (1._dl - w)*tab(lo) + w*tab(hi)
+    val = SS%amp*f/(x**SS%gamma_w*sqrt(tau))
+    if (SS%tau_collapse > 0._dl) then
+        call StringCollapseWindow(SS, tau, W_c, Wdot)
+        val = val*W_c
+    end if
+
+    end function StringSourceValue
+
+    subroutine StringCollapseWindow(SS, tau, W, Wdot)
+    ! Network collapse window W = [1 - tanh((tau - tau_collapse)/width)]/2 and dW/dtau (W = 1 if no collapse)
+    type(TStringSourceParams), intent(in) :: SS
+    real(dl), intent(in) :: tau
+    real(dl), intent(out) :: W, Wdot
+    real(dl) :: u
+
+    W = 1._dl
+    Wdot = 0._dl
+    if (SS%tau_collapse <= 0._dl) return
+    u = (tau - SS%tau_collapse)/SS%collapse_width
+    if (u > 40._dl) then
+        W = 0._dl
+    else if (u > -40._dl) then
+        W = 0.5_dl*(1._dl - tanh(u))
+        Wdot = -0.5_dl/SS%collapse_width/cosh(u)**2
+    end if
+
+    end subroutine StringCollapseWindow
+
+    subroutine StringScalarSource(SS, k, tau, E, Edot, S, Sdot)
+    ! Scalar cosmic string sources Theta_00 (E) and Theta^S (S) and their conformal time derivatives (amp included)
+    type(TStringSourceParams), intent(in) :: SS
+    real(dl), intent(in) :: k, tau
+    real(dl), intent(out) :: E, Edot, S, Sdot
+    real(dl) :: x, lx, w, pre, f, df
+    integer :: i, lo, hi
+
+    E = 0._dl
+    Edot = 0._dl
+    S = 0._dl
+    Sdot = 0._dl
+    x = k*tau
+    if (x <= 0._dl) return
+    lx = log(x)
+    if (lx <= SS%lnx(1) .or. lx >= SS%lnx(SS%nx)) return
+    lo = 1
+    hi = SS%nx
+    do while (hi - lo > 1)
+        i = (lo + hi)/2
+        if (SS%lnx(i) > lx) then
+            hi = i
+        else
+            lo = i
+        end if
+    end do
+    w = (lx - SS%lnx(lo))/(SS%lnx(hi) - SS%lnx(lo))
+    pre = SS%amp/(x**SS%gamma_w)
+    f = (1._dl - w)*SS%s00(lo) + w*SS%s00(hi)
+    df = (1._dl - w)*SS%ds00(lo) + w*SS%ds00(hi)
+    E = pre*f/sqrt(tau)
+    Edot = pre*(df - (SS%gamma_w + 0.5_dl)*f)/(tau*sqrt(tau))
+    f = (1._dl - w)*SS%sstress(lo) + w*SS%sstress(hi)
+    df = (1._dl - w)*SS%dsstress(lo) + w*SS%dsstress(hi)
+    S = pre*f/sqrt(tau)
+    Sdot = pre*(df - (SS%gamma_w + 0.5_dl)*f)/(tau*sqrt(tau))
+
+    end subroutine StringScalarSource
 
     subroutine MassiveNuVarsOut(EV, y, yprime, a, adotoa, grho, gpres, dgrho, dgq, dgpi, dgpi_diff, pidot_sum, &
         clxnu_all)
@@ -2106,6 +2263,12 @@
         y(EV%r_ix + 3) = initvec(i_aj3r)
     end if
 
+    ! cosmic string sources: purely active perturbations, no adiabatic initial conditions
+    y(ix_strD) = 0._dl
+    y(ix_strR) = 0._dl
+    y(ix_strQ) = 0._dl
+    if (CP%StringSource%active) y(1:EV%nvar) = 0._dl
+
     if (CP%Num_Nu_massive == 0) return
 
     do nu_i = 1, CP%Nu_mass_eigenstates
@@ -2186,6 +2349,7 @@
     x = k*tau
 
     tens0 = 1
+    if (CP%StringSource%active) tens0 = 0
 
     yt(ixt_H) = tens0
     ! commented things are for the compensated mode with magnetic fields; can be neglected
@@ -2271,6 +2435,9 @@
     yv((EV%lmaxv - 1 + 1) + (EV%lmaxpolv - 1)*2 + 3 + 1 + 1) = pir
     yv((EV%lmaxv - 1 + 1) + (EV%lmaxpolv - 1)*2 + 3 + 1 + 2) = 3._dl/7*x*Magnetic*(1 - 1/bigR)
 
+    ! cosmic string sources: purely active, no initial vector mode
+    if (CP%StringSource%active) yv(2:EV%nvarv) = 0._dl
+
     end subroutine initialv
 
     subroutine outtransf(EV, y, tau, Arr)
@@ -2315,6 +2482,9 @@
     real(dl) E2, dopacity
     integer l, i, ind, ind2, off_ix, ix
     real(dl) dgs, sigmadot, dz
+    real(dl) str_E, str_Edot, str_S, str_Sdot, str_D, str_T, str_W, str_Wdot, str_R, str_Q
+    real(dl) str_v, str_Zm, str_Pi, str_Pidot, str_wb
+    integer ib, ixR, ixQ, lstr
     real(dl) dgpi, dgrho_matter, grho_matter, clxnu, gpres_nu
     ! non-flat vars
     real(dl) cothxor ! 1/tau in flat case
@@ -2430,6 +2600,96 @@
     ! 8*pi*a*a*SUM[(rho_i+p_i)*v_i]
     dgq = dgq + grhog_t*qg + grhor_t*qr
 
+    ! Cosmic string source (pure perturbation, no background): Theta_00, Theta_D (momentum), Theta^S
+    ayprime(ix_strD) = 0._dl
+    ayprime(ix_strR) = 0._dl
+    ayprime(ix_strQ) = 0._dl
+    str_E = 0._dl
+    str_Edot = 0._dl
+    str_S = 0._dl
+    str_Sdot = 0._dl
+    str_Pi = 0._dl
+    str_Pidot = 0._dl
+    if (CP%StringSource%active) then
+        call StringCollapseWindow(CP%StringSource, tau, str_W, str_Wdot)
+        if (CP%StringSource%remnant_only) then
+            ! no network: the gas is created at tau_collapse with a white-noise energy perturbation amp*weight
+            str_E = CP%StringSource%amp
+            str_D = 0._dl
+        else
+            call StringScalarSource(CP%StringSource, k, tau, str_E, str_Edot, str_S, str_Sdot)
+            str_D = ay(ix_strD)
+            ! conservation of the uncollapsed network: D' = -2H D - k^2/3 (T + 2 S), with T = (D - E')/H - E
+            str_T = (str_D - str_Edot)/adotoa - str_E
+            ayprime(ix_strD) = -2*adotoa*str_D - k2/3*(str_T + 2*str_S)
+        end if
+        ! network collapse: the window removes the strings, and the energy and momentum they lose go into the
+        ! decay products (a fluid with equation of state w_decay, or a free-streaming gas), conserving the total
+        str_R = 0._dl
+        str_Q = 0._dl
+        if (EV%strgas_ix > 0) then
+            ! free-streaming gas of particles injected with momentum p/m at a_collapse, in momentum bins; v = p/E.
+            ! For each bin, energy-weighted moments R = 8 pi G a^2 delta rho, Q = -k 8 pi G a^2 (rho+p) v, and for
+            ! l >= 2 Z_l = v-weighted moments in the units of Q. Anisotropic stress dgpi contribution = -v Z_2/k.
+            lstr = EV%strgas_lmax
+            do ib = 1, EV%strgas_nbins
+                if (CP%StringSource%decay_nbins > 0) then
+                    str_v = CP%StringSource%decay_p_bins(ib)
+                    str_wb = CP%StringSource%decay_w_bins(ib)
+                else
+                    str_v = CP%StringSource%decay_p_over_m
+                    str_wb = 1._dl
+                end if
+                str_v = str_v*str_a_collapse/a
+                str_v = str_v/sqrt(1 + str_v**2)
+                if (ib == 1) then
+                    ixR = ix_strR
+                    ixQ = ix_strQ
+                    ix = EV%strgas_ix ! Z_2
+                else
+                    ixR = EV%strgas_ix + lstr - 1 + (ib - 2)*(lstr + 1)
+                    ixQ = ixR + 1
+                    ix = ixR + 2 ! Z_2
+                end if
+                ayprime(ixR) = -adotoa*(1 + str_v**2)*ay(ixR) + ay(ixQ) - str_wb*str_Wdot*str_E
+                ayprime(ixQ) = -2*adotoa*ay(ixQ) - k2/3*str_v**2*ay(ixR) - 2*k/3*str_v*ay(ix) &
+                    - str_wb*str_Wdot*str_D
+                do l = 2, lstr - 1
+                    if (l == 2) then
+                        str_Zm = ay(ixQ)
+                    else
+                        str_Zm = ay(ix + l - 3)
+                    end if
+                    ayprime(ix + l - 2) = -2*adotoa*ay(ix + l - 2) + str_v*k/(2*l + 1)* &
+                        (l*str_Zm - (l + 1)*ay(ix + l - 1))
+                end do
+                l = lstr
+                ayprime(ix + l - 2) = -2*adotoa*ay(ix + l - 2) + str_v*k*ay(ix + l - 3) - (l + 1)*ay(ix + l - 2)/tau
+                str_R = str_R + ay(ixR)
+                str_Q = str_Q + ay(ixQ)
+                str_Pi = str_Pi - str_v*ay(ix)/k
+                str_Pidot = str_Pidot - (-adotoa*str_v*(1 - str_v**2)*ay(ix) + str_v*ayprime(ix))/k
+            end do
+        else
+            str_R = ay(ix_strR)
+            str_Q = ay(ix_strQ)
+            ayprime(ix_strR) = -adotoa*(1 + 3*CP%StringSource%w_decay)*str_R + str_Q - str_Wdot*str_E
+            ayprime(ix_strQ) = -2*adotoa*str_Q - k2*CP%StringSource%w_decay*str_R - str_Wdot*str_D
+        end if
+        if (CP%StringSource%remnant_only) then
+            ! only the decay products gravitate
+            dgrho = dgrho + str_R
+            dgq = dgq - str_Q/k
+            str_S = 0._dl
+            str_Sdot = 0._dl
+        else
+            dgrho = dgrho + str_W*str_E + str_R
+            dgq = dgq - (str_W*str_D + str_Q)/k
+            str_Sdot = str_W*str_Sdot + str_Wdot*str_S
+            str_S = str_W*str_S
+        end if
+    end if
+
     ! Photon mass density over baryon mass density
     photbar = grhog_t/grhob_t
     pb43 = 4._dl/3*photbar
@@ -2518,7 +2778,7 @@
             ! AL: First order slip seems to be fine here to 2e-4
 
             ! 8*pi*G*a*a*SUM[rho_i*sigma_i]
-            dgs = grhog_t*pig + grhor_t*pir
+            dgs = grhog_t*pig + grhor_t*pir - str_S + str_Pi
 
             ! Define shear derivative to first order
             sigmadot = -2*adotoa*sigma - dgs/k + etak
@@ -2835,9 +3095,10 @@
             dgq_de = 0
         end if
 
-        dgpi = grhor_t*pir + grhog_t*pig
+        dgpi = grhor_t*pir + grhog_t*pig - str_S + str_Pi
         dgpi_diff = 0 ! sum (3*p_nu -rho_nu)*pi_nu
-        pidot_sum = grhog_t*pigdot + grhor_t*pirdot
+        ! string terms give d(dgpi)/dtau - 2H dgpi in diff_rhopi
+        pidot_sum = grhog_t*pigdot + grhor_t*pirdot - str_Sdot - 2*adotoa*str_S + str_Pidot + 2*adotoa*str_Pi
         clxnu = 0
         if (State%CP%Num_Nu_massive /= 0) then
             call MassiveNuVarsOut(EV, ay, ayprime, a, adotoa, dgpi=dgpi, clxnu_all=clxnu, &
@@ -3130,6 +3391,7 @@
     ! Get the propagation equation for the shear
 
     rhopi = grhog_t*pig + grhor_t*pir + grhog_t*Magnetic
+    if (CP%StringSource%active) rhopi = rhopi + StringSourceValue(CP%StringSource, CP%StringSource%vec, k, tau)
 
     yvprime(2) = -2*adotoa*sigma - rhopi/k
 
@@ -3233,6 +3495,7 @@
     grhog_t = State%grhog/a2
 
     rhopi = grhog_t*pig
+    if (CP%StringSource%active) rhopi = rhopi + StringSourceValue(CP%StringSource, CP%StringSource%tens, k, tau)
 
     !  Neutrino equations:
     !  Anisotropic stress
