@@ -102,6 +102,39 @@
         integer, allocatable :: custom_source_ell_scales(:)
     end type TCustomSourceParams
 
+    ! Tabulated cosmic string (USM) eigenmode source functions, used as active sources (no inflationary primordial part)
+    ! Source for k, tau: Theta(k,tau) = amp * F(x)/(x**gamma_w * sqrt(tau)), x = k*tau, F tabulated in ln x
+    type TStringSourceParams
+        logical :: active = .false.
+        integer :: nx = 0
+        real(dl) :: gamma_w = 0.25_dl
+        real(dl) :: amp = 1._dl
+        real(dl) :: tau_collapse = 0._dl ! conformal time of network collapse (Mpc); <= 0 for no collapse
+        real(dl) :: collapse_width = 0._dl ! tanh width of the collapse window (Mpc)
+        real(dl) :: w_decay = 0._dl ! equation of state of the collapse products (scalar fluid absorbing the energy)
+        ! If decay_p_over_m > 0 the collapse products are instead a free-streaming gas of particles injected with
+        ! momentum p/m = decay_p_over_m at tau_collapse (p ~ 1/a afterwards), evolved with a Boltzmann hierarchy
+        real(dl) :: decay_p_over_m = 0._dl
+        integer :: decay_lmax = 10 ! maximum multipole of the decay-product hierarchy
+        ! Optional momentum distribution of the decay products: decay_nbins > 0 momentum bins with p/m = decay_p_bins
+        ! at tau_collapse, each receiving the fraction decay_w_bins of the released string energy and momentum
+        ! (the weights should sum to one for the total stress-energy to be conserved); overrides decay_p_over_m
+        integer :: decay_nbins = 0
+        real(dl) :: decay_p_bins(8) = 0._dl
+        real(dl) :: decay_w_bins(8) = 0._dl
+        ! remnant_only: no string network at all. The decay-product gas alone is created at tau_collapse with a
+        ! k-independent (white noise) energy perturbation 8 pi G a^2 delta rho = amp*decay_w_bins and no momentum,
+        ! everything else unperturbed (an isocurvature-like initial condition set at tau_collapse)
+        logical :: remnant_only = .false.
+        real(dl), allocatable :: lnx(:) ! ascending ln(k tau) grid
+        real(dl), allocatable :: tens(:) ! tensor anisotropic stress source Theta^T
+        real(dl), allocatable :: vec(:) ! vector anisotropic stress source Theta^V
+        real(dl), allocatable :: s00(:) ! scalar energy density source Theta_00
+        real(dl), allocatable :: sstress(:) ! scalar anisotropic stress source Theta^S
+        real(dl), allocatable :: ds00(:) ! d s00/d ln x
+        real(dl), allocatable :: dsstress(:) ! d sstress/d ln x
+    end type TStringSourceParams
+
     ! Non-linear corrections, either just P(k), or just CMB lensing/sources, or both
     integer, parameter :: NonLinear_none = 0, NonLinear_Pk = 1, NonLinear_Lens = 2
     integer, parameter :: NonLinear_both = 3
@@ -194,6 +227,7 @@
         type(TSourceWindowHolder), allocatable :: SourceWindows(:)
 
         type(TCustomSourceParams) :: CustomSources
+        type(TStringSourceParams) :: StringSource
     contains
     procedure, nopass :: PythonClass => CAMBparams_PythonClass
     procedure, nopass :: SelfPointer => CAMBparams_SelfPointer
