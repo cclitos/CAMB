@@ -2483,7 +2483,7 @@
     integer l, i, ind, ind2, off_ix, ix
     real(dl) dgs, sigmadot, dz
     real(dl) str_E, str_Edot, str_S, str_Sdot, str_D, str_T, str_W, str_Wdot, str_R, str_Q
-    real(dl) str_v, str_Zm, str_Pi, str_Pidot, str_wb
+    real(dl) str_v, str_Zm, str_Pi, str_Pidot, str_wb, str_comp
     integer ib, ixR, ixQ, lstr
     real(dl) dgpi, dgrho_matter, grho_matter, clxnu, gpres_nu
     ! non-flat vars
@@ -2610,6 +2610,7 @@
     str_Sdot = 0._dl
     str_Pi = 0._dl
     str_Pidot = 0._dl
+    str_comp = 0._dl
     if (CP%StringSource%active) then
         call StringCollapseWindow(CP%StringSource, tau, str_W, str_Wdot)
         if (CP%StringSource%remnant_only) then
@@ -2676,6 +2677,17 @@
             ayprime(ix_strR) = -adotoa*(1 + 3*CP%StringSource%w_decay)*str_R + str_Q - str_Wdot*str_E
             ayprime(ix_strQ) = -2*adotoa*str_Q - k2*CP%StringSource%w_decay*str_R - str_Wdot*str_D
         end if
+        if (CP%StringSource%remnant_only .and. CP%StringSource%remnant_compensate) then
+            ! isocurvature injection: d(8 pi G a^2 delta rho_gas)/dtau from the source is -Wdot*E*sum(w); remove it from
+            ! the other species in adiabatic proportions, d delta_r/dtau = str_comp for photons and massless neutrinos
+            ! and 3/4 of it for baryons and CDM
+            if (CP%StringSource%decay_nbins > 0) then
+                str_wb = sum(CP%StringSource%decay_w_bins(1:CP%StringSource%decay_nbins))
+            else
+                str_wb = 1._dl
+            end if
+            str_comp = str_wb*str_Wdot*str_E/(grhog_t + grhor_t + 0.75_dl*(grhob_t + grhoc_t))
+        end if
         if (CP%StringSource%remnant_only) then
             ! only the decay products gravitate
             dgrho = dgrho + str_R
@@ -2719,14 +2731,14 @@
         EV%w_ix, a, adotoa, k, z, ay)
 
     ! CDM equation of motion
-    clxcdot = -k*z
+    clxcdot = -k*z + 0.75_dl*str_comp
     ayprime(ix_clxc) = clxcdot
 
     ! Baryon equation of motion.
-    clxbdot = -k*(z + vb)
+    clxbdot = -k*(z + vb) + 0.75_dl*str_comp
     ayprime(ix_clxb) = clxbdot
     ! Photon equation of motion
-    clxgdot = -k*(4._dl/3._dl*z + qg)
+    clxgdot = -k*(4._dl/3._dl*z + qg) + str_comp
 
     ! Sources
     if (EV%evolve_baryon_cs) then
@@ -2859,7 +2871,7 @@
 
     if (.not. EV%no_nu_multpoles) then
         ! Massless neutrino equations of motion.
-        clxrdot = -k*(4._dl/3._dl*z + qr)
+        clxrdot = -k*(4._dl/3._dl*z + qr) + str_comp
         ayprime(EV%r_ix) = clxrdot
         qrdot = EV%denlk(1)*clxr - EV%denlk2(1)*pir
         ayprime(EV%r_ix + 1) = qrdot

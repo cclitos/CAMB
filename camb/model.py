@@ -298,6 +298,7 @@ class StringSourceParams(CAMB_Structure):
         ("decay_p_bins", c_double * 8, "p/m at tau_collapse for each momentum bin"),
         ("decay_w_bins", c_double * 8, "fraction of the released string energy going into each momentum bin"),
         ("remnant_only", c_bool, "no string network: only the decay-product gas, created at tau_collapse"),
+        ("remnant_compensate", c_bool, "with remnant_only: take the injected energy from the other species (isocurvature)"),
         ("lnx", AllocatableArrayDouble, "ln(k tau) grid"),
         ("tens", AllocatableArrayDouble, "tensor anisotropic stress F"),
         ("vec", AllocatableArrayDouble, "vector anisotropic stress F"),
@@ -1160,6 +1161,7 @@ class CAMBparams(F2003Class):
         decay_p_bins=None,
         decay_w_bins=None,
         remnant_only=False,
+        remnant_compensate=False,
     ):
         """
         Use tabulated cosmic string source functions as active sources, replacing the inflationary primordial
@@ -1197,6 +1199,9 @@ class CAMBparams(F2003Class):
             8 pi G a^2 delta rho = amp * w in each bin, no momentum, and everything else unperturbed. This is white
             noise in the gas energy, so use a primordial spectrum P ~ k^3 as for the eigenmode sources. The weights
             need not sum to one. Scalars only.
+        :param remnant_compensate: with remnant_only, remove the injected energy perturbation from the other species
+            in adiabatic proportions (delta_gamma = delta_nu = 4/3 delta_b = 4/3 delta_c), so that the total density
+            perturbation is unchanged at tau_collapse (isocurvature injection). Massive neutrinos are not compensated.
         :return: self
         """
         import numpy as np
@@ -1234,7 +1239,10 @@ class CAMBparams(F2003Class):
             ss.decay_nbins = 0
         if remnant_only and (tau_collapse <= 0 or (decay_p_bins is None and decay_p_over_m <= 0)):
             raise ValueError("remnant_only requires tau_collapse > 0 and decay_p_bins or decay_p_over_m")
+        if remnant_compensate and not remnant_only:
+            raise ValueError("remnant_compensate requires remnant_only")
         ss.remnant_only = remnant_only
+        ss.remnant_compensate = remnant_compensate
         ss.lnx = lnx
         ss.tens = tab(tens)
         ss.vec = tab(vec)

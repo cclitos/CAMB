@@ -126,6 +126,10 @@
         ! k-independent (white noise) energy perturbation 8 pi G a^2 delta rho = amp*decay_w_bins and no momentum,
         ! everything else unperturbed (an isocurvature-like initial condition set at tau_collapse)
         logical :: remnant_only = .false.
+        ! remnant_compensate (with remnant_only): the injected gas energy is taken from the other species in adiabatic
+        ! proportions (delta_gamma = delta_nu = 4/3 delta_b = 4/3 delta_c), so the total delta rho is unchanged at
+        ! tau_collapse: a pure isocurvature injection, as causality requires on super-horizon scales
+        logical :: remnant_compensate = .false.
         real(dl), allocatable :: lnx(:) ! ascending ln(k tau) grid
         real(dl), allocatable :: tens(:) ! tensor anisotropic stress source Theta^T
         real(dl), allocatable :: vec(:) ! vector anisotropic stress source Theta^V
